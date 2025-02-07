@@ -2,8 +2,10 @@ library flutter_client_sse;
 
 import 'dart:async';
 import 'dart:convert';
+
 import 'package:flutter_client_sse/constants/sse_request_type_enum.dart';
 import 'package:http/http.dart' as http;
+
 part 'sse_event_model.dart';
 
 /// A client for subscribing to Server-Sent Events (SSE).
@@ -43,12 +45,14 @@ class SSEClient {
   /// [body] is an optional request body for POST requests.
   ///
   /// Returns a [Stream] of [SSEModel] representing the SSE events.
-  static Stream<SSEModel> subscribeToSSE(
-      {required SSERequestType method,
-      required String url,
-      required Map<String, String> header,
-      StreamController<SSEModel>? oldStreamController,
-      Map<String, dynamic>? body}) {
+  static Stream<SSEModel> subscribeToSSE({
+    required SSERequestType method,
+    required String url,
+    required Map<String, String> header,
+    StreamController<SSEModel>? oldStreamController,
+    Map<String, dynamic>? body,
+    bool autoReconnect = true,
+  }) {
     StreamController<SSEModel> streamController = StreamController();
     if (oldStreamController != null) {
       streamController = oldStreamController;
@@ -110,8 +114,7 @@ class SSEClient {
                     currentSSEModel.event = value;
                     break;
                   case 'data':
-                    currentSSEModel.data =
-                        (currentSSEModel.data ?? '') + value + '\n';
+                    currentSSEModel.data = (currentSSEModel.data ?? '') + value + '\n';
                     break;
                   case 'id':
                     currentSSEModel.id = value;
@@ -121,47 +124,52 @@ class SSEClient {
                   default:
                     print('---ERROR---');
                     print(dataLine);
-                    _retryConnection(
-                      method: method,
-                      url: url,
-                      header: header,
-                      streamController: streamController,
-                    );
+                    if (autoReconnect) {
+                      _retryConnection(
+                        method: method,
+                        url: url,
+                        header: header,
+                        streamController: streamController,
+                      );
+                    }
                 }
               },
               onError: (e, s) {
                 print('---ERROR---');
                 print(e);
-                _retryConnection(
-                  method: method,
-                  url: url,
-                  header: header,
-                  body: body,
-                  streamController: streamController,
-                );
+                if (autoReconnect) {
+                  _retryConnection(
+                    method: method,
+                    url: url,
+                    header: header,
+                    streamController: streamController,
+                  );
+                }
               },
             );
         }, onError: (e, s) {
           print('---ERROR---');
           print(e);
-          _retryConnection(
-            method: method,
-            url: url,
-            header: header,
-            body: body,
-            streamController: streamController,
-          );
+          if (autoReconnect) {
+            _retryConnection(
+              method: method,
+              url: url,
+              header: header,
+              streamController: streamController,
+            );
+          }
         });
       } catch (e) {
         print('---ERROR---');
         print(e);
-        _retryConnection(
-          method: method,
-          url: url,
-          header: header,
-          body: body,
-          streamController: streamController,
-        );
+        if (autoReconnect) {
+          _retryConnection(
+            method: method,
+            url: url,
+            header: header,
+            streamController: streamController,
+          );
+        }
       }
       return streamController.stream;
     }

@@ -5,6 +5,7 @@ void main() {
   ///GET REQUEST
   SSEClient.subscribeToSSE(
     method: SSERequestType.GET,
+    maxRetries: 1,
     url: 'http://localhost:3000/sse',
     headers: {
       "Cookie":
@@ -23,6 +24,7 @@ void main() {
   ///POST REQUEST
   SSEClient.subscribeToSSE(
       method: SSERequestType.POST,
+      maxRetries: 1,
       url: 'http://192.168.1.2:3000/api/activity-stream?historySnapshot=FIVE_MINUTE',
       headers: {
         "Cookie":

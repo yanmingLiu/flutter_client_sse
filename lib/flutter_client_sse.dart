@@ -10,7 +10,18 @@ part 'sse_event_model.dart';
 
 /// SSE 客户端
 class SSEClient {
-  static const Duration retryDelay = Duration(seconds: 5); // 重试间隔
+  static const Duration retryDelay = Duration(seconds: 5);
+  static final Map<String, StreamController<SSEModel>> _connections = {};
+
+  /// 关闭指定 SSE 连接
+  static void closeConnection(String url) {
+    final controller = _connections[url];
+    if (controller != null && !controller.isClosed) {
+      controller.close();
+      _connections.remove(url);
+      print("🛑 手动关闭 SSE 连接: $url");
+    }
+  }
 
   /// 处理 SSE 连接的重试逻辑
   static void _retryConnection({
@@ -28,6 +39,7 @@ class SSEClient {
       if (!streamController.isClosed) {
         streamController.addError(Exception(errorMsg));
         streamController.close();
+        _connections.remove(url);
       }
       return;
     }
@@ -49,32 +61,6 @@ class SSEClient {
     });
   }
 
-  /// 处理 SSE 连接错误
-  static void _handleError({
-    required dynamic error,
-    required SSERequestType method,
-    required String url,
-    required Map<String, String> headers,
-    required StreamController<SSEModel> streamController,
-    required int maxRetries,
-    required int retriesLeft,
-    Map<String, dynamic>? body,
-  }) {
-    print('❌ SSE 连接错误: $error');
-    if (!streamController.isClosed) {
-      streamController.addError(error);
-      _retryConnection(
-        method: method,
-        url: url,
-        headers: headers,
-        streamController: streamController,
-        maxRetries: maxRetries,
-        retriesLeft: retriesLeft,
-        body: body,
-      );
-    }
-  }
-
   /// 订阅 SSE 事件
   static Stream<SSEModel> subscribeToSSE({
     required SSERequestType method,
@@ -86,12 +72,12 @@ class SSEClient {
     int? retriesLeft,
   }) {
     final StreamController<SSEModel> streamController = oldStreamController ?? StreamController();
-    final http.Client client = http.Client(); // 独立的 HTTP 客户端
+    final http.Client client = http.Client();
 
     final lineRegex = RegExp(r'^([^:]*)(?::)?(?: )?(.*)?$');
 
-    // 初始化剩余重试次数
     retriesLeft ??= maxRetries;
+    _connections[url] = streamController;
 
     print("📡 连接 SSE: $url");
 
@@ -107,8 +93,8 @@ class SSEClient {
 
       client.send(request).then((response) {
         if (response.statusCode < 200 || response.statusCode >= 300) {
-          _handleError(
-            error: 'HTTP ${response.statusCode}',
+          streamController.addError(Exception('HTTP ${response.statusCode}'));
+          _retryConnection(
             method: method,
             url: url,
             headers: headers,
@@ -123,37 +109,51 @@ class SSEClient {
         SSEModel currentSSEModel = SSEModel(data: '', id: '', event: '');
 
         response.stream.transform(utf8.decoder).transform(const LineSplitter()).listen(
-              (dataLine) {
-                if (dataLine.isEmpty) {
-                  if (currentSSEModel.data != null && currentSSEModel.data!.isNotEmpty) {
-                    streamController.add(currentSSEModel);
-                  }
-                  currentSSEModel = SSEModel(data: '', id: '', event: '');
-                  return;
-                }
+          (dataLine) {
+            if (dataLine.isEmpty) {
+              if (currentSSEModel.data != null && currentSSEModel.data!.isNotEmpty) {
+                streamController.add(currentSSEModel);
+              }
+              currentSSEModel = SSEModel(data: '', id: '', event: '');
+              return;
+            }
 
-                final match = lineRegex.firstMatch(dataLine);
-                if (match == null) return;
+            final match = lineRegex.firstMatch(dataLine);
+            if (match == null) return;
 
-                final field = match.group(1);
-                final value = match.group(2) ?? '';
+            final field = match.group(1);
+            final value = match.group(2) ?? '';
 
-                switch (field) {
-                  case 'event':
-                    currentSSEModel.event = value;
-                    break;
-                  case 'data':
-                    currentSSEModel.data = (currentSSEModel.data ?? '') + value + '\n';
-                    break;
-                  case 'id':
-                    currentSSEModel.id = value;
-                    break;
-                  default:
-                    print('⚠️ 未知字段: $dataLine');
-                }
-              },
-              onError: (e) => _handleError(
-                error: e,
+            switch (field) {
+              case 'event':
+                currentSSEModel.event = value;
+                break;
+              case 'data':
+                currentSSEModel.data = (currentSSEModel.data ?? '') + value + '\n';
+                break;
+              case 'id':
+                currentSSEModel.id = value;
+                break;
+              default:
+                print('⚠️ 未知字段: $dataLine');
+            }
+          },
+          onError: (e) {
+            streamController.addError(e);
+            _retryConnection(
+              method: method,
+              url: url,
+              headers: headers,
+              streamController: streamController,
+              maxRetries: maxRetries,
+              retriesLeft: retriesLeft!,
+              body: body,
+            );
+          },
+          onDone: () {
+            print('🔌 SSE 连接关闭');
+            if (!streamController.isClosed) {
+              _retryConnection(
                 method: method,
                 url: url,
                 headers: headers,
@@ -161,40 +161,26 @@ class SSEClient {
                 maxRetries: maxRetries,
                 retriesLeft: retriesLeft!,
                 body: body,
-              ),
-              onDone: () {
-                print('🔌 SSE 连接关闭');
-                if (!streamController.isClosed) {
-                  _retryConnection(
-                    method: method,
-                    url: url,
-                    headers: headers,
-                    streamController: streamController,
-                    maxRetries: maxRetries,
-                    retriesLeft: retriesLeft!,
-                    body: body,
-                  );
-                }
-              },
-              cancelOnError: true,
-            );
-      }).catchError(
-        (e) {
-          _handleError(
-            error: e,
-            method: method,
-            url: url,
-            headers: headers,
-            streamController: streamController,
-            maxRetries: maxRetries,
-            retriesLeft: retriesLeft!,
-            body: body,
-          );
-        },
-      );
+              );
+            }
+          },
+          cancelOnError: true,
+        );
+      }).catchError((e) {
+        streamController.addError(e);
+        _retryConnection(
+          method: method,
+          url: url,
+          headers: headers,
+          streamController: streamController,
+          maxRetries: maxRetries,
+          retriesLeft: retriesLeft!,
+          body: body,
+        );
+      });
     } catch (e) {
-      _handleError(
-        error: e,
+      streamController.addError(e);
+      _retryConnection(
         method: method,
         url: url,
         headers: headers,
@@ -207,6 +193,7 @@ class SSEClient {
 
     streamController.onCancel = () {
       client.close();
+      _connections.remove(url);
       print("🛑 SSE 连接已关闭");
     };
 

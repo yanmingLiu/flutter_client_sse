@@ -8,175 +8,179 @@ import 'package:http/http.dart' as http;
 
 part 'sse_event_model.dart';
 
-/// A client for subscribing to Server-Sent Events (SSE).
+/// SSE 客户端
 class SSEClient {
-  static http.Client _client = new http.Client();
+  static const int maxRetries = 5; // 最大重试次数
 
-  /// Retry the SSE connection after a delay.
-  ///
-  /// [method] is the request method (GET or POST).
-  /// [url] is the URL of the SSE endpoint.
-  /// [header] is a map of request headers.
-  /// [body] is an optional request body for POST requests.
-  /// [streamController] is required to persist the stream from the old connection
-  static void _retryConnection(
-      {required SSERequestType method,
-      required String url,
-      required Map<String, String> header,
-      required StreamController<SSEModel> streamController,
-      Map<String, dynamic>? body}) {
-    print('---RETRY CONNECTION---');
+  /// 处理 SSE 连接的重试逻辑
+  static void _retryConnection({
+    required SSERequestType method,
+    required String url,
+    required Map<String, String> headers,
+    required StreamController<SSEModel> streamController,
+    Map<String, dynamic>? body,
+    int retryCount = 0,
+  }) {
+    if (retryCount >= maxRetries) {
+      print('⚠️ 已达到最大重试次数 ($maxRetries)，停止重试');
+      if (!streamController.isClosed) {
+        streamController.addError(Exception('已达到最大重试次数 ($maxRetries)，停止重试'));
+        streamController.close();
+      }
+      return;
+    }
+
+    print('🔄 SSE 重新连接中... (第 ${retryCount + 1} 次)');
+
     Future.delayed(Duration(seconds: 5), () {
-      subscribeToSSE(
-        method: method,
-        url: url,
-        header: header,
-        body: body,
-        oldStreamController: streamController,
-      );
+      if (!streamController.isClosed) {
+        subscribeToSSE(
+          method: method,
+          url: url,
+          headers: headers,
+          body: body,
+          oldStreamController: streamController,
+          retryCount: retryCount + 1,
+        );
+      }
     });
   }
 
-  /// Subscribe to Server-Sent Events.
-  ///
-  /// [method] is the request method (GET or POST).
-  /// [url] is the URL of the SSE endpoint.
-  /// [header] is a map of request headers.
-  /// [body] is an optional request body for POST requests.
-  ///
-  /// Returns a [Stream] of [SSEModel] representing the SSE events.
+  /// 订阅 SSE 事件
   static Stream<SSEModel> subscribeToSSE({
     required SSERequestType method,
     required String url,
-    required Map<String, String> header,
+    required Map<String, String> headers,
     StreamController<SSEModel>? oldStreamController,
     Map<String, dynamic>? body,
-    bool autoReconnect = true,
+    int retryCount = 0,
   }) {
-    StreamController<SSEModel> streamController = StreamController();
-    if (oldStreamController != null) {
-      streamController = oldStreamController;
-    }
-    var lineRegex = RegExp(r'^([^:]*)(?::)?(?: )?(.*)?$');
-    var currentSSEModel = SSEModel(data: '', id: '', event: '');
-    print("--SUBSCRIBING TO SSE---");
-    while (true) {
-      try {
-        _client = http.Client();
-        var request = new http.Request(
-          method == SSERequestType.GET ? "GET" : "POST",
-          Uri.parse(url),
-        );
+    final StreamController<SSEModel> streamController = oldStreamController ?? StreamController();
+    final http.Client client = http.Client(); // 每个连接独立的 Client
+    final lineRegex = RegExp(r'^([^:]*)(?::)?(?: )?(.*)?$');
+    SSEModel currentSSEModel = SSEModel(data: '', id: '', event: '');
 
-        /// Adding headers to the request
-        header.forEach((key, value) {
-          request.headers[key] = value;
-        });
+    print("📡 正在连接 SSE: $url");
 
-        /// Adding body to the request if exists
-        if (body != null) {
-          request.body = jsonEncode(body);
-        }
+    try {
+      final request = http.Request(
+        method == SSERequestType.GET ? "GET" : "POST",
+        Uri.parse(url),
+      );
 
-        Future<http.StreamedResponse> response = _client.send(request);
+      request.headers.addAll(headers);
+      if (body != null) request.body = jsonEncode(body);
 
-        /// Listening to the response as a stream
-        response.asStream().listen((data) {
-          /// Applying transforms and listening to it
-          data.stream
-            ..transform(Utf8Decoder()).transform(LineSplitter()).listen(
-              (dataLine) {
-                if (dataLine.isEmpty) {
-                  /// This means that the complete event set has been read.
-                  /// We then add the event to the stream
-                  streamController.add(currentSSEModel);
-                  currentSSEModel = SSEModel(data: '', id: '', event: '');
-                  return;
-                }
-
-                /// Get the match of each line through the regex
-                Match match = lineRegex.firstMatch(dataLine)!;
-                var field = match.group(1);
-                if (field!.isEmpty) {
-                  return;
-                }
-                var value = '';
-                if (field == 'data') {
-                  // If the field is data, we get the data through the substring
-                  value = dataLine.substring(
-                    5,
-                  );
-                } else {
-                  value = match.group(2) ?? '';
-                }
-                switch (field) {
-                  case 'event':
-                    currentSSEModel.event = value;
-                    break;
-                  case 'data':
-                    currentSSEModel.data = (currentSSEModel.data ?? '') + value + '\n';
-                    break;
-                  case 'id':
-                    currentSSEModel.id = value;
-                    break;
-                  case 'retry':
-                    break;
-                  default:
-                    print('---ERROR---');
-                    print(dataLine);
-                    if (autoReconnect) {
-                      _retryConnection(
-                        method: method,
-                        url: url,
-                        header: header,
-                        streamController: streamController,
-                      );
-                    }
-                }
-              },
-              onError: (e, s) {
-                print('---ERROR---');
-                print(e);
-                if (autoReconnect) {
-                  _retryConnection(
-                    method: method,
-                    url: url,
-                    header: header,
-                    streamController: streamController,
-                  );
-                }
-              },
-            );
-        }, onError: (e, s) {
-          print('---ERROR---');
-          print(e);
-          if (autoReconnect) {
-            _retryConnection(
-              method: method,
-              url: url,
-              header: header,
-              streamController: streamController,
-            );
-          }
-        });
-      } catch (e) {
-        print('---ERROR---');
-        print(e);
-        if (autoReconnect) {
+      client.send(request).then((response) {
+        // 检查 HTTP 状态码
+        if (response.statusCode < 200 || response.statusCode >= 300) {
+          print('❌ HTTP 错误: ${response.statusCode}');
+          streamController.addError(Exception('HTTP ${response.statusCode}'));
           _retryConnection(
             method: method,
             url: url,
-            header: header,
+            headers: headers,
             streamController: streamController,
+            body: body,
+            retryCount: retryCount,
+          );
+          return;
+        }
+
+        response.stream.transform(utf8.decoder).transform(const LineSplitter()).listen(
+          (dataLine) {
+            if (dataLine.isEmpty) {
+              streamController.add(currentSSEModel);
+              currentSSEModel = SSEModel(data: '', id: '', event: '');
+              return;
+            }
+
+            final match = lineRegex.firstMatch(dataLine);
+            if (match == null) return;
+
+            final field = match.group(1);
+            final value = match.group(2) ?? '';
+
+            switch (field) {
+              case 'event':
+                currentSSEModel.event = value;
+                break;
+              case 'data':
+                currentSSEModel.data = (currentSSEModel.data ?? '') + value + '\n';
+                break;
+              case 'id':
+                currentSSEModel.id = value;
+                break;
+              case 'retry':
+                break;
+              default:
+                print('⚠️ 未知字段: $dataLine');
+            }
+          },
+          onError: (e) {
+            print('❌ SSE 连接错误: $e');
+            if (!streamController.isClosed) {
+              streamController.addError(e);
+              _retryConnection(
+                method: method,
+                url: url,
+                headers: headers,
+                streamController: streamController,
+                body: body,
+                retryCount: retryCount,
+              );
+            }
+          },
+          onDone: () {
+            print('🔌 SSE 连接关闭');
+            if (!streamController.isClosed) {
+              _retryConnection(
+                method: method,
+                url: url,
+                headers: headers,
+                streamController: streamController,
+                body: body,
+                retryCount: retryCount,
+              );
+            }
+          },
+          cancelOnError: true,
+        );
+      }).catchError((e) {
+        print('❌ HTTP 请求失败: $e');
+        if (!streamController.isClosed) {
+          streamController.addError(e);
+          _retryConnection(
+            method: method,
+            url: url,
+            headers: headers,
+            streamController: streamController,
+            body: body,
+            retryCount: retryCount,
           );
         }
+      });
+    } catch (e) {
+      print('❌ 发生异常: $e');
+      if (!streamController.isClosed) {
+        streamController.addError(e);
+        _retryConnection(
+          method: method,
+          url: url,
+          headers: headers,
+          streamController: streamController,
+          body: body,
+          retryCount: retryCount,
+        );
       }
-      return streamController.stream;
     }
-  }
 
-  /// Unsubscribe from the SSE.
-  static void unsubscribeFromSSE() {
-    _client.close();
+    // 监听流控制器关闭，终止 Client 和连接
+    streamController.onCancel = () {
+      client.close();
+      print("🛑 SSE 连接已关闭");
+    };
+
+    return streamController.stream;
   }
 }

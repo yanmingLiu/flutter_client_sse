@@ -22,6 +22,9 @@ class SSEClient {
   }) {
     if (retriesLeft == null || retriesLeft <= 0) {
       print('---MAX RETRY LIMIT REACHED---');
+      streamController.addError('Erro: Max retry limit reached');
+      streamController.close();
+      _client.close();
       return;
     }
 
